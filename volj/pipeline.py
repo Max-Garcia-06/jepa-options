@@ -10,14 +10,14 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from volj.config import (H, L, MAX_FFILL, SPLITS, FEATURE_SETS)
+from volj.config import FEATURE_SETS, L, MAX_FFILL, SPLITS
 from volj.controls import har_vrp, lastday_control, pca_control
 from volj.data.features import apply_scaler, build_panel, fit_scaler
 from volj.embed import embed
-from volj.gate import REPO_ROOT, _git_rev, g1, g2, g3
+from volj.gate import REPO_ROOT, g1, g2, g3, git_dirty, git_rev
 from volj.pnl import long_spx_pnl, short_var_ladder_pnl
 from volj.probes import brier, fit_probe, predict, select_param, sq_error
-from volj.splits import split_dates, test_end
+from volj.splits import split_dates
 from volj.strategies import (always_hedged, always_short, s1_weights, s2_weights,
                              s3_pnl, select_s3, term_structure)
 from volj.targets import crash_label, crash_threshold, vrp_target
@@ -33,7 +33,7 @@ def config_sha256() -> str:
 
 
 def meta(extra: dict) -> dict:
-    return {"git_rev": _git_rev(), "config_sha256": config_sha256(), **extra}
+    return {"git_rev": git_rev(), "dirty": git_dirty(), "config_sha256": config_sha256(), **extra}
 
 
 @dataclass
@@ -50,11 +50,12 @@ class Ctx:
     seeds: tuple
     epochs: int
     min_seeds: int
-    test_last: pd.Timestamp
+    crash_thr: float  # train-split threshold: the fixed label definition
+    crash_y: pd.Series
 
     def bounds(self, name: str) -> tuple[pd.Timestamp, pd.Timestamp]:
         lo, hi = SPLITS[name]
-        return pd.Timestamp(lo), pd.Timestamp(hi) if hi else self.test_last
+        return pd.Timestamp(lo), pd.Timestamp(hi) if hi else self.dates[-1]
 
 
 def prepare(raw: dict, feature_set: str, cost: float, seeds: tuple, epochs: int,
@@ -75,8 +76,9 @@ def prepare(raw: dict, feature_set: str, cost: float, seeds: tuple, epochs: int,
         keep = d[dates.get_indexer(d) >= L - 1]
         log.info("split %s: dropped %d dates lacking %d-day context", name, len(d) - len(keep), L)
         splits[name] = keep
+    thr = crash_threshold(vrp, splits["train"])
     return Ctx(panel, scaled, scaled.to_numpy(float), dates, spx, vix, vrp, splits, cost,
-               tuple(seeds), epochs, min_seeds, test_end(dates))
+               tuple(seeds), epochs, min_seeds, thr, crash_label(vrp, thr))
 
 
 def train_positions(ctx: Ctx) -> np.ndarray:
@@ -115,8 +117,7 @@ def tune(ctx: Ctx, encoders: list) -> dict:
 def fit_predict(ctx: Ctx, encoders: list, params: dict, fit: pd.DatetimeIndex,
                 at: pd.DatetimeIndex) -> dict:
     """Refit probes on `fit` with tuned params; predict on `at`. Seed average = mean."""
-    thr = crash_threshold(ctx.vrp, ctx.splits["train"])  # fixed label definition
-    yc = crash_label(ctx.vrp, thr)
+    yc = ctx.crash_y
     feats = _inputs(ctx, encoders, fit, fit.append(at))
     vrp_p, p_c = {}, {}
     for name, F in feats.items():
@@ -144,7 +145,6 @@ def strategy_pnls(ctx: Ctx, strat: str, preds: dict, params: dict, at: pd.Dateti
     """{'pnl','comparators','dd_bench','strategy_only'} for one strategy on split `split`."""
     lo, hi = ctx.bounds(split)
     pnl = lambda w: _restrict(ctx, w, cost, lo, hi)  # noqa: E731
-    term = term_structure(ctx.panel["vix"].loc[at], ctx.panel["vix6m"].loc[at])
     if strat == "S3":
         h = params["s3"]["jepa"]["h"]
         def s3(name):
@@ -154,12 +154,13 @@ def strategy_pnls(ctx: Ctx, strat: str, preds: dict, params: dict, at: pd.Dateti
                  "never_hedged": long_spx_pnl(ctx.spx).loc[lo:hi],
                  "pca": s3("pca"), "lastday": s3("lastday")}
         return {"pnl": s3("jepa"), "comparators": comps, "dd_bench": comps["never_hedged"],
-                "strategy_only": {"always_hedged", "never_hedged"}}
+                "strategy_only": {"always_hedged", "never_hedged"}, "hedge_h": h}
+    term = term_structure(ctx.panel["vix"].loc[at], ctx.panel["vix6m"].loc[at])
     comps = {"always_short": pnl(always_short(at)), "term_structure": pnl(term)}
     if strat == "S1":
         tstd = float(ctx.vrp.loc[ctx.splits["train"]].std())
         weights = {n: s1_weights(preds["vrp"][n], tstd) for n in ("jepa", *INPUTS)}
-        comps["har"] = pnl(s1_weights(har_vrp(ctx.spx, ctx.vix, har_fit, at, cost), tstd))
+        comps["har"] = pnl(s1_weights(har_vrp(ctx.spx, ctx.vix, har_fit, at, ctx.cost), tstd))
         only = {"always_short", "term_structure", "har"}
     else:
         weights = {n: s2_weights(preds["p"][n]) for n in ("jepa", *INPUTS)}
@@ -175,7 +176,7 @@ def g1_for(ctx: Ctx, strat: str, preds: dict, at: pd.DatetimeIndex) -> dict:
     if strat == "S1":
         y, key, loss = ctx.vrp.loc[at], "vrp", sq_error
     else:
-        y = crash_label(ctx.vrp, crash_threshold(ctx.vrp, ctx.splits["train"])).loc[at]
+        y = ctx.crash_y.loc[at]
         key, loss = "p", brier
     return g1(loss(preds[key]["jepa"], y), [loss(s, y) for s in preds[key]["jepa_seeds"]],
               {n: loss(preds[key][n], y) for n in INPUTS}, min_seeds=ctx.min_seeds)
@@ -189,6 +190,8 @@ def gates(ctx: Ctx, strats, preds: dict, params: dict, at: pd.DatetimeIndex, spl
         sp = strategy_pnls(ctx, s, preds, params, at, split, cost, har_fit)
         r = {"g2": g2(sp["pnl"], sp["comparators"], sp["dd_bench"], sp["strategy_only"]),
              "g3": g3(sp["pnl"], sp["dd_bench"], windows)}
+        if "hedge_h" in sp:
+            r["g2"]["comparators"]["always_hedged"]["h_notional"] = sp["hedge_h"]
         if with_g1:
             src = "S2" if s == "S3" else s
             if src not in g1_cache:

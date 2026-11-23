@@ -10,6 +10,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import torch
 
 from volj import config
@@ -26,12 +27,15 @@ CBOE_SYMS = ["VIX", "VIX6M", "VVIX", "SKEW", "VIX3M", "VIX9D"]
 SMOKE = {"seeds": (0, 1), "epochs": 1, "min_seeds": 1}
 
 
-def make_ctx(args, out: Path) -> Ctx:
+def run_settings(args) -> dict:
     if args.smoke:
-        raw, kw = synthetic_raw(), SMOKE
-    else:
-        raw = load_raw(REPO_ROOT / "data" / "raw", CBOE_SYMS)
-        kw = {"seeds": config.SEEDS, "epochs": config.EPOCHS, "min_seeds": config.MIN_SEEDS_POSITIVE}
+        return SMOKE
+    return {"seeds": config.SEEDS, "epochs": config.EPOCHS, "min_seeds": config.MIN_SEEDS_POSITIVE}
+
+
+def make_ctx(args, out: Path) -> Ctx:
+    kw = run_settings(args)
+    raw = synthetic_raw() if args.smoke else load_raw(REPO_ROOT / "data" / "raw", CBOE_SYMS)
     return prepare(raw, args.feature_set, args.cost, **kw)
 
 
@@ -70,6 +74,38 @@ def _info(args, ctx: Ctx) -> dict:
                  "seeds": list(ctx.seeds), "n_dates": {k: len(v) for k, v in ctx.splits.items()}})
 
 
+def save_preds(preds: dict, path: Path) -> None:
+    """Per-seed and seed-averaged val predictions: vrp_* (S1 ridge) and p_* (S2/S3 logit)."""
+    cols = {}
+    for key, d in preds.items():
+        for name, v in d.items():
+            if name == "jepa_seeds":
+                for k, s in enumerate(v):
+                    cols[f"{key}_jepa_seed_idx{k}"] = s
+            else:
+                cols[f"{key}_{name}"] = v
+    pd.DataFrame(cols).to_parquet(path)
+
+
+def preflight(args, out: Path) -> None:
+    """Checks that touch no test data; must pass before the one-shot lock is taken."""
+    gate = out / "val_gate.json"
+    if not gate.exists():
+        return  # acquire_test_lock refuses with "val gate not passed"
+    m = json.loads(gate.read_text()).get("meta", {})
+    for key, now in (("feature_set", args.feature_set), ("cost", args.cost), ("smoke", args.smoke)):
+        if m.get(key) != now:
+            raise RuntimeError(f"test settings differ from val run: {key} was {m.get(key)!r}, "
+                               f"now {now!r}")
+    try:
+        json.loads((out / "params.json").read_text())
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"params.json missing or unreadable: {e}") from e
+    for k in run_settings(args)["seeds"]:
+        if not (out / f"encoder_seed{k}.pt").exists():
+            raise RuntimeError(f"missing encoder_seed{k}.pt; cannot run test stage")
+
+
 def stage_val(args, out: Path) -> None:
     ctx = make_ctx(args, out)
     if args.smoke and not (out / f"encoder_seed{ctx.seeds[0]}.pt").exists():
@@ -82,15 +118,18 @@ def stage_val(args, out: Path) -> None:
     res = gates(ctx, STRATEGIES, preds, params, val, "val", STRESS_VAL, ctx.cost, train)
     sens = gates(ctx, STRATEGIES, preds, params, val, "val", STRESS_VAL, COST_SENS, train,
                  with_g1=False)
+    res["crash_threshold_train"] = ctx.crash_thr
     res["cost_sensitivity"] = {"cost": COST_SENS, "report_only": True, "strategies": sens}
     res["params"] = params
     res["meta"] = _info(args, ctx)
     write_report(res, out / "val_gate.json")
+    save_preds(preds, out / "val_preds.parquet")
     print({s: res[s]["eligible_for_test"] for s in STRATEGIES})
 
 
 def stage_test(args, out: Path) -> None:
-    acquire_test_lock(out)  # first: refuses a re-run or an unpassed val gate
+    preflight(args, out)
+    acquire_test_lock(out)  # before any test data: refuses a re-run or an unpassed val gate
     val_gate = json.loads((out / "val_gate.json").read_text())
     eligible = [s for s in STRATEGIES if val_gate[s]["eligible_for_test"]]
     params = json.loads((out / "params.json").read_text())
@@ -114,8 +153,11 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    smoke_dir_ok = lambda p: not p.resolve().is_relative_to(REPO_ROOT / "outputs" / "r01")  # noqa
     out = args.out or (Path(tempfile.mkdtemp(prefix="r01_smoke_")) if args.smoke
                        else REPO_ROOT / "outputs" / "r01" / args.feature_set)
+    if args.smoke and not smoke_dir_ok(out):
+        ap.error("--smoke must not write under outputs/r01; use a separate --out")
     out.mkdir(parents=True, exist_ok=True)
     {"fetch": stage_fetch, "pretrain": stage_pretrain, "val": stage_val,
      "test": stage_test}[args.stage](args, out)

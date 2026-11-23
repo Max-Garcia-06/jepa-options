@@ -82,13 +82,22 @@ def g3(pnl: pd.Series, bench: pd.Series, windows: list[tuple[str, str]]) -> dict
     return {"pass": all(v["pass"] for v in per.values()), "windows": per}
 
 
-def _git_rev() -> str:
+def git_rev() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
                              capture_output=True, text=True, check=True, timeout=30)
         return out.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
+
+
+def git_dirty() -> bool:
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                             capture_output=True, text=True, check=True, timeout=30)
+        return bool(out.stdout.strip())
+    except Exception:
+        return True
 
 
 def acquire_test_lock(out_dir: Path) -> None:
@@ -104,7 +113,7 @@ def acquire_test_lock(out_dir: Path) -> None:
                        for v in data.values())
     if not eligible:
         raise RuntimeError("val gate not passed")
-    payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "git_rev": _git_rev()}
+    payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "git_rev": git_rev()}
     with open(lock, "x") as f:
         json.dump(payload, f)
 
