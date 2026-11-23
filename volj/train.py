@@ -37,6 +37,8 @@ def pretrain(
     np.random.seed(seed)
     train_pos = np.asarray(train_pos, dtype=int)
     # Target windows must end at or before the last train position.
+    if len(train_pos) == 0:
+        raise ValueError("too few training windows to pretrain")
     usable = train_pos[train_pos + H <= train_pos.max()]
     ctx_np, tgt_np = build_windows(X, usable)
     if len(ctx_np) < 2:
@@ -57,19 +59,18 @@ def pretrain(
     gen = torch.Generator().manual_seed(seed)
     history: list[float] = []
     n = len(ctx)
+    starts = list(range(0, n, BATCH))
+    if n - starts[-1] == 1 and len(starts) > 1:  # merge lone trailing sample
+        starts.pop()
+    ends = starts[1:] + [n]
     for _ in range(epochs):
         encoder.train()
         predictor.train()
         _tgt_encoder.eval()
         perm = torch.randperm(n, generator=gen)
+        batches = [perm[i:j] for i, j in zip(starts, ends)]
         total, count = 0.0, 0
-        starts = list(range(0, n, BATCH))
-        for k, i in enumerate(starts):
-            # a lone trailing sample is merged into the previous batch (var/cov need >=2)
-            if k == len(starts) - 1 and n - i == 1 and k > 0:
-                break
-            end = n if (k == len(starts) - 2 and n - starts[-1] == 1) else i + BATCH
-            b = perm[i:end]
+        for b in batches:
             z = encoder(ctx[b])
             with torch.no_grad():
                 z_tgt = _tgt_encoder(tgt[b])

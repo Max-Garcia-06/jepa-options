@@ -56,3 +56,20 @@ def test_train_pos_window_bound():
     X = _ar1(300)
     ctx, _ = build_windows(X, np.arange(59, 300))
     assert len(ctx) == 300 - 21 - 59
+
+
+def test_pretrain_ignores_rows_after_last_train_pos():
+    X = _ar1(300)
+    pos = np.arange(59, 200)
+    Xp = X.copy()
+    Xp[pos.max() + 1 :] = 1e6
+    a = _out(pretrain(X, pos, seed=0, epochs=1), X)
+    b = _out(pretrain(Xp, pos, seed=0, epochs=1), X)
+    assert np.array_equal(a, b)
+
+
+def test_pretrain_empty_positions_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="too few"):
+        pretrain(_ar1(300), np.array([], dtype=int), seed=0, epochs=1)
