@@ -94,3 +94,44 @@ def test_spx_final_bar_kept_after_cutoff(tmp_path, monkeypatch):
     s = fetch_spx(tmp_path, now=datetime(2026, 11, 23, 16, 30, tzinfo=NY))
     assert s.index[-1] == pd.Timestamp("2026-11-23")
     assert s.tolist() == [5000.0, 5010.0]
+
+
+def test_spx_cache_hit_filters_partial_bar(tmp_path):
+    from datetime import datetime
+
+    from volj.data.fetch import NY, fetch_spx
+
+    idx = pd.DatetimeIndex(pd.to_datetime(["2026-11-20", "2026-11-23"]), name="date")
+    pd.Series([5000.0, 5010.0], index=idx, name="spx").to_frame().to_parquet(
+        tmp_path / "SPX.parquet"
+    )
+    s = fetch_spx(tmp_path, now=datetime(2026, 11, 23, 10, 0, tzinfo=NY))
+    assert s.index[-1] == pd.Timestamp("2026-11-20")
+    s = fetch_spx(tmp_path, now=datetime(2026, 11, 23, 17, 0))  # naive = ET
+    assert s.index[-1] == pd.Timestamp("2026-11-23")
+
+
+def _patch_download(monkeypatch, dates, values):
+    import yfinance
+
+    cols = pd.MultiIndex.from_product([["Close"], ["^GSPC"]])
+    df = pd.DataFrame([[v] for v in values], index=pd.to_datetime(dates), columns=cols)
+    monkeypatch.setattr(yfinance, "download", lambda *a, **k: df)
+
+
+def test_spx_duplicate_dates_raise(tmp_path, monkeypatch):
+    from volj.data.fetch import fetch_spx
+
+    _patch_download(monkeypatch, ["2026-11-18", "2026-11-18"], [1.0, 2.0])
+    with pytest.raises(ValueError, match="spx"):
+        fetch_spx(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_spx_unsorted_sorted(tmp_path, monkeypatch):
+    from volj.data.fetch import fetch_spx
+
+    _patch_download(monkeypatch, ["2026-11-19", "2026-11-18"], [2.0, 1.0])
+    s = fetch_spx(tmp_path)
+    assert s.tolist() == [1.0, 2.0]
+    assert s.index.is_monotonic_increasing

@@ -56,13 +56,32 @@ def fetch_cboe(sym: str, cache_dir: Path, refresh: bool = False) -> pd.Series:
     return series
 
 
+def _drop_partial_bar(s: pd.Series, now: datetime | None) -> pd.Series:
+    """Drop rows dated today (ET) unless the ET session close (16:15) has passed."""
+    if now is None:
+        now = datetime.now(NY)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=NY)
+    now_et = now.astimezone(NY)
+    if (now_et.hour, now_et.minute) > CLOSE_CUTOFF:
+        return s
+    partial = s.index >= pd.Timestamp(now_et.date())
+    if partial.any():
+        log.warning(
+            "spx: dropping incomplete bar(s) %s",
+            [d.date().isoformat() for d in s.index[partial]],
+        )
+        s = s[~partial]
+    return s
+
+
 def fetch_spx(
     cache_dir: Path, refresh: bool = False, now: datetime | None = None
 ) -> pd.Series:
     cache_dir = Path(cache_dir)
     path = cache_dir / "SPX.parquet"
     if path.exists() and not refresh:
-        return pd.read_parquet(path)["spx"]
+        return _drop_partial_bar(pd.read_parquet(path)["spx"], now)
     import yfinance
 
     df = yfinance.download("^GSPC", start="2005-01-01", auto_adjust=False, progress=False)
@@ -76,14 +95,7 @@ def fetch_spx(
     s.name = "spx"
     if not s.index.is_unique:
         raise ValueError("spx: duplicate dates from yfinance")
-    s = s.sort_index()
-    now_et = (now or datetime.now(NY)).astimezone(NY)
-    if (now_et.hour, now_et.minute) <= CLOSE_CUTOFF:
-        today = pd.Timestamp(now_et.date())
-        partial = s.index >= today
-        if partial.any():
-            log.warning("spx: dropping incomplete bar(s) %s", [d.date().isoformat() for d in s.index[partial]])
-            s = s[~partial]
+    s = _drop_partial_bar(s.sort_index(), now)
     cache_dir.mkdir(parents=True, exist_ok=True)
     s.to_frame().to_parquet(path)
     return s
