@@ -46,14 +46,20 @@ def g1(loss_jepa_avg: pd.Series, loss_jepa_seeds: list[pd.Series],
        loss_controls: dict[str, pd.Series], min_seeds: int = MIN_SEEDS_POSITIVE) -> dict:
     per_control = {}
     ok = True
+    seed_beats = [True] * len(loss_jepa_seeds)  # per seed: beats EVERY control
     for name, lc in loss_controls.items():
         d = _aligned_diff(lc, loss_jepa_avg)
         lo, hi = block_bootstrap_ci(d)
-        seeds_pos = int(sum(_aligned_diff(lc, ls).mean() > 0 for ls in loss_jepa_seeds))
+        seed_diffs = [float(_aligned_diff(lc, ls).mean()) for ls in loss_jepa_seeds]
+        seed_beats = [b and sd > 0 for b, sd in zip(seed_beats, seed_diffs)]
         per_control[name] = {"mean_diff": float(d.mean()), "ci": (lo, hi),
-                             "seeds_positive": seeds_pos}
-        ok = ok and lo > 0 and seeds_pos >= min_seeds
-    return {"pass": bool(ok), "per_control": per_control}
+                             "seeds_positive": int(sum(sd > 0 for sd in seed_diffs)),
+                             "seed_diffs": seed_diffs}
+        ok = ok and lo > 0
+    seeds_beating_all = int(sum(seed_beats))
+    ok = ok and seeds_beating_all >= min_seeds
+    return {"pass": bool(ok), "per_control": per_control,
+            "seeds_beating_all_controls": seeds_beating_all, "min_seeds": min_seeds}
 
 
 def g2(pnl: pd.Series, comparators: dict[str, pd.Series], dd_bench: pd.Series,
@@ -75,8 +81,13 @@ def g2(pnl: pd.Series, comparators: dict[str, pd.Series], dd_bench: pd.Series,
 
 
 def g3(pnl: pd.Series, bench: pd.Series, windows: list[tuple[str, str]]) -> dict:
+    if not windows:
+        raise ValueError("g3 needs at least one stress window")
     per = {}
     for s, e in windows:
+        for name, ser in (("pnl", pnl), ("bench", bench)):
+            if len(ser.loc[s:e]) == 0:
+                raise ValueError(f"g3 window {s}:{e} has no {name} rows")
         pl, bl = window_loss(pnl, s, e), window_loss(bench, s, e)
         per[f"{s}:{e}"] = {"loss": pl, "bench_loss": bl, "pass": bool(pl <= bl)}
     return {"pass": all(v["pass"] for v in per.values()), "windows": per}

@@ -46,6 +46,22 @@ def test_g1_seed_rule():
     assert g1(jepa, seeds, controls, min_seeds=3)["pass"] is True
 
 
+def test_g1_strict_per_seed_rule():
+    # seed 0 beats neither control, seeds 1-3 beat both, seed 4 beats only pca (loss 1.4 vs
+    # lastday 1.3): 4 seeds beat pca, but only 3 beat every control.
+    jepa = _series(1.0, seed=1)
+    seeds = [_series(m, seed=10 + i) for i, m in enumerate([1.6, 1.0, 1.0, 1.0, 1.4])]
+    ctl = {"pca": _series(1.5, seed=2), "lastday": _series(1.3, seed=3)}
+    r = g1(jepa, seeds, ctl, min_seeds=4)
+    assert r["per_control"]["pca"]["seeds_positive"] == 4
+    assert r["per_control"]["lastday"]["seeds_positive"] == 3
+    assert r["seeds_beating_all_controls"] == 3
+    assert len(r["per_control"]["pca"]["seed_diffs"]) == 5
+    assert r["per_control"]["pca"]["seed_diffs"][0] < 0 < r["per_control"]["pca"]["seed_diffs"][1]
+    assert r["pass"] is False
+    assert g1(jepa, seeds, ctl, min_seeds=3)["pass"] is True
+
+
 def test_g1_empty_intersection_and_nan():
     a = _series(1.0, 50)
     b = pd.Series(1.0, index=pd.bdate_range("2030-01-01", periods=50))
@@ -90,6 +106,17 @@ def test_g3_window():
     assert g3(pnl, bench, [w1, w2])["pass"] is True
     pnl.loc[idx[15]] = -1.0
     assert g3(pnl, bench, [w1, w2])["pass"] is False
+
+
+def test_g3_rejects_empty_windows_and_rows():
+    idx = _idx(100)
+    pnl = pd.Series(0.0, index=idx)
+    with pytest.raises(ValueError, match="at least one"):
+        g3(pnl, pnl, [])
+    with pytest.raises(ValueError, match="no pnl rows"):
+        g3(pnl, pnl, [("2030-01-01", "2030-02-01")])
+    with pytest.raises(ValueError, match="no bench rows"):
+        g3(pnl, pnl.iloc[:50], [(str(idx[60].date()), str(idx[70].date()))])
 
 
 def _gate(tmp_path, eligible):
