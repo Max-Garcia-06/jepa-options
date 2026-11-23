@@ -73,3 +73,45 @@ def test_har_vrp_shape_and_alignment():
     vix = pd.Series(20 + rng.standard_normal(400), index=dates)
     out = har_vrp(spx, vix, dates[30:250], dates[300:350], 1.0)
     assert out.index.equals(dates[300:350]) and out.notna().all()
+
+
+def _har_inputs(n=500, seed=3):
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2010-01-01", periods=n)
+    r = rng.standard_normal(n) * 0.01
+    r[::40] *= 4
+    spx = pd.Series(100 * np.exp(np.cumsum(r)), index=dates)
+    vix = pd.Series(20 + rng.standard_normal(n), index=dates)
+    return spx, vix, dates
+
+
+def test_har_vrp_rejects_label_overlap():
+    spx, vix, dates = _har_inputs()
+    at = dates[300:320]
+    with pytest.raises(ValueError, match="overlap"):
+        har_vrp(spx, vix, dates[30:295], at, 1.0)  # ends 5 days before at[0]
+    # embargoed: last fit pos + H + 1 < pos(at[0])
+    har_vrp(spx, vix, dates[30 : 300 - 23], at, 1.0)
+
+
+def test_har_vrp_rejects_bad_at():
+    spx, vix, dates = _har_inputs()
+    with pytest.raises(ValueError):
+        har_vrp(spx, vix, dates[30:200], dates[[5, 300]], 1.0)  # NaN regressors
+    with pytest.raises(ValueError):
+        har_vrp(spx, vix, dates[30:200], pd.DatetimeIndex(["1999-01-01"]), 1.0)
+
+
+def test_har_vrp_end_to_end(monkeypatch):
+    import volj.controls as controls
+    from volj.targets import entry_k2
+
+    spx, vix, dates = _har_inputs()
+    regs = har_regressors(spx)
+    y = 0.002 + 0.3 * regs["rv2_1"] + 0.2 * regs["rv2_5"] + 0.5 * regs["rv2_22"]
+    monkeypatch.setattr(controls, "forward_rv2", lambda s: y)
+    at = dates[300:330]
+    out = har_vrp(spx, vix, dates[30:250], at, 1.0)
+    forecast = y.loc[at]  # exact linear target -> OLS recovers it exactly
+    expected = entry_k2(vix, 1.0).loc[at] - forecast
+    np.testing.assert_allclose(out.to_numpy(), expected.to_numpy(), atol=1e-10)

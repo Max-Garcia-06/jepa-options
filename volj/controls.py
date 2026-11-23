@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-from volj.config import D, L
+from volj.config import D, H, L
 from volj.embed import window_positions
 from volj.targets import entry_k2, forward_rv2
 
@@ -56,8 +56,22 @@ def har_vrp(
     at: pd.DatetimeIndex,
     cost_volpt: float,
 ) -> pd.Series:
-    """entry_k2 minus the HAR forecast of forward_rv2, at `at`."""
+    """entry_k2 minus the HAR forecast of forward_rv2, at `at`.
+
+    Contract: `fit_on` must be embargoed. The label at fit date t uses returns up
+    to position t+H+1, so the last fit position + H + 1 must be strictly before
+    the first out-of-sample `at` position; otherwise ValueError.
+    """
     regs = har_regressors(spx)
+    pos_at = spx.index.get_indexer(at)
+    if (pos_at < 0).any():
+        raise ValueError("`at` dates not in spx index")
+    if regs.iloc[pos_at].isna().any().any():
+        raise ValueError("`at` dates have NaN HAR regressors (insufficient history)")
+    oos = at[at > fit_on[-1]]
+    if len(oos):
+        if spx.index.get_loc(fit_on[-1]) + H + 1 >= spx.index.get_loc(oos[0]):
+            raise ValueError("HAR fit labels overlap evaluation dates; pass embargoed fit_on")
     intercept, beta = fit_ols(regs, forward_rv2(spx), fit_on)
     forecast = intercept + regs.loc[at].to_numpy() @ beta
     k2 = entry_k2(vix_pts, cost_volpt).loc[at]
