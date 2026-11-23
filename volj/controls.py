@@ -6,7 +6,7 @@ from sklearn.decomposition import PCA
 
 from volj.config import D, H, L
 from volj.embed import window_positions
-from volj.targets import entry_k2, forward_rv2
+from volj.targets import forward_rv2
 
 
 def _flat_windows(X: np.ndarray, pos: np.ndarray, L: int) -> np.ndarray:
@@ -56,7 +56,9 @@ def har_vrp(
     at: pd.DatetimeIndex,
     cost_volpt: float,
 ) -> pd.Series:
-    """entry_k2 minus the HAR forecast of forward_rv2, at `at`.
+    """K2 at t (VIX at t, net of cost) minus the HAR forecast of forward_rv2, at `at`.
+
+    The signal at t uses only VIX at t (not the t+1 entry strike).
 
     Contract: `fit_on` must be embargoed. The label at fit date t uses returns up
     to position t+H+1, so the last fit position + H + 1 must be strictly before
@@ -74,5 +76,5 @@ def har_vrp(
             raise ValueError("HAR fit labels overlap evaluation dates; pass embargoed fit_on")
     intercept, beta = fit_ols(regs, forward_rv2(spx), fit_on)
     forecast = intercept + regs.loc[at].to_numpy() @ beta
-    k2 = entry_k2(vix_pts, cost_volpt).loc[at]
+    k2 = ((vix_pts.loc[at] - cost_volpt) / 100.0) ** 2
     return (k2 - pd.Series(forecast, index=at)).rename("har_vrp")

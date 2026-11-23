@@ -104,7 +104,6 @@ def test_har_vrp_rejects_bad_at():
 
 def test_har_vrp_end_to_end(monkeypatch):
     import volj.controls as controls
-    from volj.targets import entry_k2
 
     spx, vix, dates = _har_inputs()
     regs = har_regressors(spx)
@@ -113,5 +112,18 @@ def test_har_vrp_end_to_end(monkeypatch):
     at = dates[300:330]
     out = har_vrp(spx, vix, dates[30:250], at, 1.0)
     forecast = y.loc[at]  # exact linear target -> OLS recovers it exactly
-    expected = entry_k2(vix, 1.0).loc[at] - forecast
+    expected = ((vix.loc[at] - 1.0) / 100.0) ** 2 - forecast
     np.testing.assert_allclose(out.to_numpy(), expected.to_numpy(), atol=1e-10)
+
+
+def test_har_vrp_uses_vix_at_t_not_t_plus_1():
+    spx, vix, dates = _har_inputs()
+    at = dates[300:330]
+    base = har_vrp(spx, vix, dates[30:250], at, 1.0)
+    vix2 = vix.copy()
+    nxt = dates[dates.get_loc(at[10]) + 1]
+    vix2.loc[nxt] += 5.0
+    out = har_vrp(spx, vix2, dates[30:250], at, 1.0)
+    assert out.loc[at[10]] == base.loc[at[10]]
+    # the shifted day itself (a signal date, t = at[11]) does change
+    assert out.loc[nxt] != base.loc[nxt]
