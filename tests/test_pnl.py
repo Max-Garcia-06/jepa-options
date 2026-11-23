@@ -94,3 +94,33 @@ def test_metrics():
     assert sharpe(pd.Series(0.1 + rng.normal(0, 0.05, 500))) > 0
     spx = pd.Series([100.0, 110.0, 99.0])
     assert long_spx_pnl(spx).iloc[1:].tolist() == pytest.approx([0.1, -0.1])
+
+
+def test_drawdown_of_long_spx_finite():
+    pnl = long_spx_pnl(pd.Series([100.0, 101.0, 99.0, 102.0, 103.0, 104.0]))
+    assert pnl.iloc[0] == 0.0
+    assert max_drawdown(pnl) == pytest.approx(1 - 99 / 101, abs=1e-12)
+
+
+def test_metrics_raise_on_nan():
+    s = pd.Series([1.0, np.nan, 2.0])
+    for f in (sharpe, max_drawdown):
+        with pytest.raises(ValueError):
+            f(s)
+    with pytest.raises(ValueError):
+        window_loss(s, 0, 2)
+
+
+def test_sharpe_zero_variance_and_empty():
+    assert sharpe(pd.Series([0.0] * 5)) == 0.0
+    assert sharpe(pd.Series([0.1] * 5)) == 0.0
+    assert sharpe(pd.Series([], dtype=float)) == 0.0
+
+
+def test_missing_vix_on_needed_date_raises():
+    spx, vix = _flat_market(40)
+    w = pd.Series(0.0, index=spx.index)
+    w.iloc[0] = 1.0
+    vix = vix.drop(vix.index[5])
+    with pytest.raises(ValueError, match="VIX"):
+        short_var_ladder_pnl(w, spx, vix, 1.0, h=21)
