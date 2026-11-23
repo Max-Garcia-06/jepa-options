@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 NY = ZoneInfo("America/New_York")
 CLOSE_CUTOFF = (16, 15)  # ET time after which today's SPX bar is final
 
+CBOE_SYMS = ["VIX", "VIX6M", "VVIX", "SKEW", "VIX3M", "VIX9D"]
 CBOE_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{sym}_History.csv"
 
 

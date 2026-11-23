@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -227,15 +228,20 @@ def fetch_straddle(entry: pd.Timestamp, keys, spy_close: pd.Series | None = None
     raise ValueError(f"no SPY {strike:.0f} straddle with bars on entry {entry.date()}")
 
 
-def run_check(weights: pd.Series, spx, vix, spy_close, keys, cost_volpt=COST_VOLPT, h=H):
-    """Real laddered P&L (variance units) and proxy P&L restricted to the used entries."""
+def run_check(weights: pd.Series, spx, vix, spy_close, keys, cost_volpt=COST_VOLPT, h=H,
+              sleep=time.sleep, backoff_s: float = 1.0):
+    """(real, proxy, n_used, n_skipped, skipped_dates): real laddered P&L (variance units)
+    and proxy P&L restricted to the used entries. Entries that raise ValueError or an
+    Alpaca APIError are skipped, counted and logged (APIError also backs off briefly)."""
+    from alpaca.common.exceptions import APIError
+
     from volj.pnl import short_var_ladder_pnl
 
     idx = spx.index
     pos = {d: i for i, d in enumerate(idx)}
     real = pd.Series(0.0, index=idx)
     used = pd.Series(0.0, index=idx)
-    n_skipped = 0
+    skipped_dates: list[str] = []
     for t, w in weights[weights != 0].items():
         e = idx[pos[t] + 1]
         try:
@@ -245,15 +251,17 @@ def run_check(weights: pd.Series, spx, vix, spy_close, keys, cost_volpt=COST_VOL
                 raise ValueError(f"only {len(pnl)} of {h} days before expiry/data end")
             T0 = (expiry - e).days / 365.0
             scale = vega_scale(spy_close[e], K, T0, call[e] + put[e])
-        except ValueError as err:
+        except (ValueError, APIError) as err:
             log.warning("skip entry %s (signal %s): %s", e.date(), t.date(), err)
-            n_skipped += 1
+            skipped_dates.append(str(e.date()))
+            if isinstance(err, APIError):
+                sleep(backoff_s)
             continue
         pnl = pnl.reindex(idx).dropna()
         real = real.add(pnl * scale * (w / h), fill_value=0.0)
         used[t] = w
     proxy = short_var_ladder_pnl(used, spx, vix, cost_volpt, h)
-    return real, proxy, int((used != 0).sum()), n_skipped
+    return real, proxy, int((used != 0).sum()), len(skipped_dates), skipped_dates
 
 
 def result_json(res: dict) -> str:
@@ -265,7 +273,8 @@ def result_json(res: dict) -> str:
 
 def main(argv=None) -> None:
     from volj.config import FEATURE_SETS
-    from volj.data.fetch import load_raw
+    from volj.data.features import build_panel
+    from volj.data.fetch import CBOE_SYMS, load_raw
     from volj.splits import test_end
 
     ap = argparse.ArgumentParser()
@@ -280,10 +289,10 @@ def main(argv=None) -> None:
     if a.weights_file is not None:
         require_weights_unlocked(out_dir)
 
-    raw = load_raw(REPO_ROOT / "data" / "raw", ["VIX"])
+    raw = load_raw(REPO_ROOT / "data" / "raw", CBOE_SYMS)
     spx = raw["spx"]
     vix = raw["vix"].reindex(spx.index).ffill(limit=2)
-    end = test_end(spx.index)
+    end = test_end(build_panel(raw, a.feature_set).index)  # panel index, as in the pipeline
     start = pd.Timestamp(ALPACA_CHECK_START)
     sig_dates = spx.index[(spx.index >= start) & (spx.index <= end)]
     if a.weights_file is not None:
@@ -296,14 +305,14 @@ def main(argv=None) -> None:
 
     keys = load_keys()
     spy = fetch_spy_close(start - pd.Timedelta(days=7), spx.index[-1] + pd.Timedelta(days=2), keys)
-    real, proxy, n_used, n_skipped = run_check(w, spx, vix, spy, keys)
+    real, proxy, n_used, n_skipped, skipped_dates = run_check(w, spx, vix, spy, keys)
     live = (real != 0) | (proxy != 0)
     real, proxy = real[live], proxy[live]
     agree = proxy_agreement(real, proxy)
     res = {"weights_mode": mode, "start": str(start.date()), "end": str(end.date()),
            "n_entries": n_used, "n_skipped": n_skipped, "daily_corr": agree["daily_corr"],
            "cum_sign_agree": agree["cum_sign_agree"], "beta": ols_beta(real, proxy),
-           "n_days": agree["n_days"]}
+           "n_days": agree["n_days"], "skipped_dates": skipped_dates}
     out.parent.mkdir(parents=True, exist_ok=True)
     text = result_json(res)
     out.write_text(text)

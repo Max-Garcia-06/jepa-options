@@ -124,9 +124,31 @@ def test_run_check_counts_subintrinsic_entry_as_skipped(monkeypatch, caplog):
     w = pd.Series(0.0, index=idx)
     w.iloc[:3] = 1.0
     with caplog.at_level("WARNING"):
-        real, proxy, n_used, n_skipped = a.run_check(w, spx, vix, spy, None)
+        real, proxy, n_used, n_skipped, skipped = a.run_check(w, spx, vix, spy, None)
     assert (n_used, n_skipped) == (0, 3)
+    assert skipped == [str(d.date()) for d in idx[1:4]]
     assert "below 1% vol value" in caplog.text
+
+
+def test_run_check_skips_api_errors_with_backoff(monkeypatch, caplog):
+    from alpaca.common.exceptions import APIError
+
+    import volj.alpaca_check as a
+    idx = pd.bdate_range("2024-02-01", periods=60)
+    spx = pd.Series(5000.0, index=idx) * np.exp(np.arange(60) * 1e-3)
+    vix, spy = pd.Series(15.0, index=idx), spx / 10
+
+    def fake(e, keys, spy_close, h):
+        raise APIError("rate limited")
+
+    monkeypatch.setattr(a, "fetch_straddle", fake)
+    w = pd.Series(0.0, index=idx)
+    w.iloc[:2] = 1.0
+    sleeps = []
+    with caplog.at_level("WARNING"):
+        out = a.run_check(w, spx, vix, spy, None, sleep=sleeps.append, backoff_s=0.5)
+    assert out[2:] == (0, 2, [str(idx[1].date()), str(idx[2].date())])
+    assert sleeps == [0.5, 0.5] and "rate limited" in caplog.text
 
 
 def test_result_json_nan_to_null():
