@@ -70,3 +70,11 @@ def test_scaler_uses_fit_dates_only():
     pd.testing.assert_series_equal(std, panel.iloc[:100].std())
     scaled = apply_scaler(panel, mean, std)
     np.testing.assert_allclose(scaled.iloc[:100].mean().to_numpy(), 0, atol=1e-10)
+
+
+def test_build_panel_drops_inf_rows():
+    raw = make_raw()
+    raw["vix6m"].iloc[100] = 0.0  # vix / vix6m -> +inf
+    panel = build_panel(raw, "core")
+    assert np.isfinite(panel.to_numpy()).all()
+    assert raw["spx"].index[100] not in panel.index

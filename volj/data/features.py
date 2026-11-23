@@ -38,7 +38,7 @@ def build_panel(raw: dict[str, pd.Series], feature_set: str) -> pd.DataFrame:
         f["vix3m_vix"] = f["vix3m"] / vix
 
     panel = pd.DataFrame(f, index=idx)[FEATURE_SETS[feature_set]]
-    clean = panel.dropna()
+    clean = panel.replace([np.inf, -np.inf], np.nan).dropna()
     log.info("build_panel(%s): dropped %d of %d rows with NaN",
              feature_set, len(panel) - len(clean), len(panel))
     return clean

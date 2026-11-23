@@ -104,7 +104,7 @@ def git_rev() -> str:
 
 def git_dirty() -> bool:
     try:
-        out = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+        out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO_ROOT,
                              capture_output=True, text=True, check=True, timeout=30)
         return bool(out.stdout.strip())
     except Exception:
