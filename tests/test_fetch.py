@@ -50,3 +50,47 @@ def test_cache_hit_skips_network(tmp_path, monkeypatch):
     monkeypatch.setattr(requests, "get", boom)
     s = fetch_cboe("VIX", tmp_path)
     assert s.tolist() == [17.24, 18.19]
+
+
+def test_duplicate_dates_raise():
+    text = "DATE,VIX\n01/02/1990,1.0\n01/02/1990,2.0\n"
+    with pytest.raises(ValueError, match="VIX"):
+        parse_cboe_csv(text, "VIX")
+
+
+def test_unsorted_dates_sorted():
+    s = parse_cboe_csv("DATE,VIX\n01/03/1990,2.0\n01/02/1990,1.0\n", "VIX")
+    assert s.tolist() == [1.0, 2.0]
+    assert s.index.is_monotonic_increasing
+
+
+def _fake_download(monkeypatch):
+    import yfinance
+
+    idx = pd.to_datetime(["2026-11-20", "2026-11-23"])
+    cols = pd.MultiIndex.from_product([["Close"], ["^GSPC"]])
+    df = pd.DataFrame([[5000.0], [5010.0]], index=idx, columns=cols)
+    monkeypatch.setattr(yfinance, "download", lambda *a, **k: df)
+
+
+def test_spx_partial_bar_dropped_before_cutoff(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from volj.data.fetch import NY, fetch_spx
+
+    _fake_download(monkeypatch)
+    s = fetch_spx(tmp_path, now=datetime(2026, 11, 23, 12, 0, tzinfo=NY))
+    assert s.index[-1] == pd.Timestamp("2026-11-20")
+    assert s.name == "spx"
+    assert pd.read_parquet(tmp_path / "SPX.parquet")["spx"].index[-1] == pd.Timestamp("2026-11-20")
+
+
+def test_spx_final_bar_kept_after_cutoff(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from volj.data.fetch import NY, fetch_spx
+
+    _fake_download(monkeypatch)
+    s = fetch_spx(tmp_path, now=datetime(2026, 11, 23, 16, 30, tzinfo=NY))
+    assert s.index[-1] == pd.Timestamp("2026-11-23")
+    assert s.tolist() == [5000.0, 5010.0]
