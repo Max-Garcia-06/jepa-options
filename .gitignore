@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.DS_Store
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# data / artifacts
+data/raw/
+data/cache/
+checkpoints/
+outputs/
+*.parquet
+*.pt
+*.log
