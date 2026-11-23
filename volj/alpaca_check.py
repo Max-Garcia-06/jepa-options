@@ -49,13 +49,14 @@ def bs_vega(S, K, T, r, q, sigma) -> float:
 
 
 def straddle_iv(price, S, K, T, r=RATE, q=DIV_YIELD) -> float:
-    """Implied vol of a call+put straddle price (brentq on [0.01, 5]; floored at 0.01)."""
+    """Implied vol of a call+put straddle price (brentq on [0.01, 5]); raises ValueError outside that range."""
     def f(sig):
         return bs_price(S, K, T, r, q, sig, "call") + bs_price(S, K, T, r, q, sig, "put") - price
 
     lo, hi = f(0.01), f(5.0)
-    if lo >= 0:  # at/below the 1% floor value (stale last-trade bars near expiry): floor the IV
-        return 0.01
+    if lo >= 0:
+        raise ValueError(f"straddle price below 1% vol value ({price:.4f} <= {price + lo:.4f}; "
+                         f"S={S}, K={K}, T={T:.4f})")
     if hi <= 0:
         raise ValueError(f"straddle price {price:.4f} exceeds the IV=500% value "
                          f"(S={S}, K={K}, T={T:.4f})")
@@ -159,7 +160,7 @@ def fetch_spy_close(start: pd.Timestamp, end: pd.Timestamp, keys) -> pd.Series:
     return _daily_closes(bars, "SPY")
 
 
-def _candidate_expiries(entry: pd.Timestamp, keys) -> list[pd.Timestamp]:
+def _candidate_expiries(entry: pd.Timestamp, keys, spot: float) -> list[pd.Timestamp]:
     """Listed SPY expiries (active + inactive) in [entry+28d, entry+40d], nearest entry+30d first.
 
     Falls back to the nearest weekday to the target if the listing returns nothing.
@@ -172,11 +173,18 @@ def _candidate_expiries(entry: pd.Timestamp, keys) -> list[pd.Timestamp]:
     client = TradingClient(*keys, paper=True)
     found: set[pd.Timestamp] = set()
     for status in (AssetStatus.ACTIVE, AssetStatus.INACTIVE):
-        resp = client.get_option_contracts(GetOptionContractsRequest(
-            underlying_symbols=["SPY"], status=status,
-            expiration_date_gte=(target - pd.Timedelta(days=2)).date(),
-            expiration_date_lte=(target + pd.Timedelta(days=10)).date(), limit=1000))
-        found |= {pd.Timestamp(c.expiration_date) for c in resp.option_contracts}
+        token = None
+        while True:
+            resp = client.get_option_contracts(GetOptionContractsRequest(
+                underlying_symbols=["SPY"], status=status,
+                expiration_date_gte=(target - pd.Timedelta(days=2)).date(),
+                expiration_date_lte=(target + pd.Timedelta(days=10)).date(),
+                strike_price_gte=f"{spot * 0.95:.2f}", strike_price_lte=f"{spot * 1.05:.2f}",
+                limit=1000, page_token=token))
+            found |= {pd.Timestamp(c.expiration_date) for c in resp.option_contracts}
+            token = resp.next_page_token
+            if not token:
+                break
     if found:
         return sorted(found, key=lambda d: (abs((d - target).days), d))
     t = target
@@ -205,7 +213,7 @@ def fetch_straddle(entry: pd.Timestamp, keys, spy_close: pd.Series | None = None
         raise ValueError(f"no SPY close on {entry.date()}")
     strike = float(round(spy_close[entry]))
     client = OptionHistoricalDataClient(*keys)
-    for expiry in _candidate_expiries(entry, keys):
+    for expiry in _candidate_expiries(entry, keys, strike):
         n_days = int(((spy_close.index > entry) & (spy_close.index <= expiry)).sum())
         if n_days < hold and spy_close.index[-1] >= expiry:
             continue  # expires before the ladder's hold period ends
@@ -248,6 +256,13 @@ def run_check(weights: pd.Series, spx, vix, spy_close, keys, cost_volpt=COST_VOL
     return real, proxy, int((used != 0).sum()), n_skipped
 
 
+def result_json(res: dict) -> str:
+    """JSON text with NaN/inf metrics as null (never emits NaN)."""
+    clean = {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+             for k, v in res.items()}
+    return json.dumps(clean, indent=2, allow_nan=False)
+
+
 def main(argv=None) -> None:
     from volj.config import FEATURE_SETS
     from volj.data.fetch import load_raw
@@ -284,16 +299,15 @@ def main(argv=None) -> None:
     real, proxy, n_used, n_skipped = run_check(w, spx, vix, spy, keys)
     live = (real != 0) | (proxy != 0)
     real, proxy = real[live], proxy[live]
+    agree = proxy_agreement(real, proxy)
     res = {"weights_mode": mode, "start": str(start.date()), "end": str(end.date()),
-           "n_entries": n_used, "n_skipped": n_skipped,
-           **(agree := proxy_agreement(real, proxy)) | {}}
-    res = {k: res[k] for k in ("weights_mode", "start", "end", "n_entries", "n_skipped",
-                               "daily_corr", "cum_sign_agree")}
-    res["beta"] = ols_beta(real, proxy)
-    res["n_days"] = agree["n_days"]
+           "n_entries": n_used, "n_skipped": n_skipped, "daily_corr": agree["daily_corr"],
+           "cum_sign_agree": agree["cum_sign_agree"], "beta": ols_beta(real, proxy),
+           "n_days": agree["n_days"]}
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(res, indent=2))
-    print(json.dumps(res, indent=2))
+    text = result_json(res)
+    out.write_text(text)
+    print(text)
 
 
 if __name__ == "__main__":
