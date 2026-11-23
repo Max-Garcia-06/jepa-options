@@ -30,8 +30,13 @@ def term_structure(vix: pd.Series, vix6m: pd.Series) -> pd.Series:
 
 
 def _hedged_pnl(hedge_w: pd.Series, h_notional: float, spx, vix_pts, cost_volpt) -> pd.Series:
-    """Long SPX plus a long-variance hedge (= minus short-variance ladder)."""
-    return long_spx_pnl(spx) - h_notional * short_var_ladder_pnl(hedge_w, spx, vix_pts, cost_volpt)
+    """Long SPX plus a long-variance hedge struck at VIX + cost.
+
+    A short ladder with cost -c has strike (VIX + c)^2; its negative is the long hedge,
+    which therefore pays the trading cost rather than receiving it.
+    """
+    ladder = short_var_ladder_pnl(hedge_w, spx, vix_pts, -cost_volpt)
+    return long_spx_pnl(spx) - h_notional * ladder
 
 
 def s3_pnl(p_crash: pd.Series, tau: float, h_notional: float, spx, vix_pts,

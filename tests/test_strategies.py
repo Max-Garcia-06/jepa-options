@@ -35,10 +35,26 @@ def test_s3_no_hedge_equals_spx(mkt):
 def test_s3_hedge_is_minus_ladder_and_always_hedged(mkt):
     spx, vix = mkt
     p = pd.Series(1.0, index=spx.index)
-    lad = short_var_ladder_pnl(pd.Series(1.0, index=spx.index), spx, vix, 1.0)
+    # long variance is struck at VIX + cost, so the hedge is a short ladder with cost -c
+    lad = short_var_ladder_pnl(pd.Series(1.0, index=spx.index), spx, vix, -1.0)
     expect = long_spx_pnl(spx) - 0.2 * lad
     pd.testing.assert_series_equal(s3_pnl(p, 0.5, 0.2, spx, vix, 1.0), expect)
     pd.testing.assert_series_equal(always_hedged(spx.index, 0.2, spx, vix, 1.0), expect)
+
+
+def test_s3_hedge_pays_cost():
+    n = 80
+    idx = pd.bdate_range("2015-01-01", periods=n)
+    rng = np.random.default_rng(2)
+    spx = pd.Series(2000 * np.exp(np.cumsum(rng.normal(0, 0.01, n))), index=idx)
+    vix = pd.Series(16.0, index=idx)  # flat VIX: only the strike differs with cost
+    tot = []
+    for c in (0.0, 1.0, 2.0):
+        h = always_hedged(idx, 0.2, spx, vix, c)
+        s3 = s3_pnl(pd.Series(1.0, index=idx), 0.5, 0.2, spx, vix, c)
+        pd.testing.assert_series_equal(h, s3)
+        tot.append((h - long_spx_pnl(spx)).sum())  # hedge leg only
+    assert tot[0] > tot[1] > tot[2]
 
 
 def test_term_structure():
