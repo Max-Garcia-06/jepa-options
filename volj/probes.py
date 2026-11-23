@@ -19,6 +19,8 @@ def fit_probe(kind: Kind, X: pd.DataFrame, y: pd.Series, param: float) -> Pipeli
     Rows with NaN y are dropped; NaN in X raises ValueError. Logit raises
     ValueError("too few crash positives") if fewer than MIN_CRASH_POSITIVES ones remain.
     """
+    if not X.index.equals(y.index):
+        raise ValueError("X and y indexes differ")
     keep = y.notna().to_numpy()
     Xk, yk = X.loc[keep], y.loc[keep]
     if Xk.isna().any().any():

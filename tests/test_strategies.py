@@ -59,3 +59,59 @@ def test_select_s3_in_grid(mkt):
     tau, h = select_s3(p, spx, vix, 1.0)
     from volj.config import S3_H_GRID, S3_TAU_GRID
     assert tau in S3_TAU_GRID and h in S3_H_GRID
+
+
+def _spike_market(spike_at, n=160):
+    """Calm market (VIX 20, ~5% realized vol) with a crash at spike_at: SPX -3%/day for
+    5 days, then +-3% swings; VIX jumps to 45 and stays there."""
+    idx = pd.bdate_range("2015-01-01", periods=n)
+    rng = np.random.default_rng(3)
+    r = rng.normal(0, 0.003, n)
+    vix = np.full(n, 20.0)
+    r[spike_at:spike_at + 5] = -0.03
+    r[spike_at + 5:] = 0.03 * (-1.0) ** np.arange(n - spike_at - 5)
+    vix[spike_at:] = 45.0
+    return pd.Series(2000 * np.exp(np.cumsum(r)), index=idx), pd.Series(vix, index=idx)
+
+
+def test_select_s3_ignores_data_after_window():
+    from volj.config import S3_H_GRID, S3_TAU_GRID
+    spx, vix = _spike_market(spike_at=62)
+    p = pd.Series(0.0, index=spx.index[:60])
+    p.iloc[30:] = 0.35  # hedging loses in-window; it pays only after the window (spike at 62)
+    hi = p.index[-1]
+    got = select_s3(p, spx, vix, 1.0)
+    truncated = select_s3(p, spx.loc[:hi], vix.loc[:hi], 1.0)
+    assert got == truncated == (0.4, 0.1)  # in-window: any hedge loses
+    # the post-window spike would change the choice if it were not excluded
+    from volj.pnl import sharpe
+    full = {(t, h): sharpe(s3_pnl(p, t, h, spx, vix, 1.0))
+            for t in S3_TAU_GRID for h in S3_H_GRID}
+    assert max(full, key=full.get) == (0.1, 0.3)
+
+
+def test_select_s3_picks_known_best_pair():
+    spx, vix = _spike_market(spike_at=45)
+    p = pd.Series(0.0, index=spx.index[:80])
+    p.iloc[:15] = 0.25                         # spurious mid-level hedges in calm, expire pre-spike
+    p.iloc[40:44] = 0.35                       # high just before the in-window spike
+    # tau 0.30 hedges only the 0.35 days; lower taus also hedge (losing) calm days
+    assert select_s3(p, spx, vix, 1.0) == (0.30, 0.3)
+
+
+def test_select_s3_tie_goes_to_first_in_grid_order():
+    spx, vix = _spike_market(spike_at=45)
+    p = pd.Series(0.0, index=spx.index[:80])  # never hedged -> every pair ties
+    assert select_s3(p, spx, vix, 1.0) == (0.10, 0.1)
+
+
+def test_select_s3_empty_raises():
+    spx, vix = _spike_market(spike_at=45)
+    with pytest.raises(ValueError):
+        select_s3(pd.Series(dtype=float), spx, vix, 1.0)
+
+
+@pytest.mark.parametrize("std", [0.0, -1.0, np.nan, np.inf])
+def test_s1_bad_std(std):
+    with pytest.raises(ValueError):
+        s1_weights(pd.Series([1.0]), std)

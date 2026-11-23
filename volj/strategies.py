@@ -8,6 +8,8 @@ from volj.pnl import long_spx_pnl, sharpe, short_var_ladder_pnl
 
 
 def s1_weights(pred_vrp: pd.Series, target_std: float) -> pd.Series:
+    if not np.isfinite(target_std) or target_std <= 0:
+        raise ValueError(f"target_std must be finite and > 0, got {target_std}")
     return (pred_vrp / target_std).clip(*S1_CLIP)
 
 
@@ -49,6 +51,8 @@ def select_s3(p_select: pd.Series, spx, vix_pts, cost) -> tuple[float, float]:
 
     Ties resolve to first in grid order (tau-major, then h).
     """
+    if len(p_select) == 0:
+        raise ValueError("p_select is empty")
     lo, hi = p_select.index[0], p_select.index[-1]
     best, best_sh = None, -np.inf
     for tau in S3_TAU_GRID:
